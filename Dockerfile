@@ -21,6 +21,7 @@ FROM debian:bookworm-slim
 
 # 安装必要的依赖
 RUN apt-get update && apt-get install -y ca-certificates && apt-get clean
+RUN mkdir /data
 
 # 将编译好的可执行文件复制到最终镜像中
 COPY --from=builder /app/ai-platform /usr/local/bin/ai-platform

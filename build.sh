@@ -43,3 +43,4 @@ else
 fi
 
 mkdir data
+mkdir sqlite_data

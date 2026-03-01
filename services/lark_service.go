@@ -1,6 +1,8 @@
 package services
 
 import (
+	"ai-platform/model"
+	"ai-platform/utils"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -23,6 +25,7 @@ type LarkService struct {
 	lastMessage string
 	msgCount    int
 	mu          sync.RWMutex
+	dbClient    *utils.SQLiteClient
 }
 
 func NewLarkService(appID, appSecret string, ai *AIService) *LarkService {
@@ -97,6 +100,26 @@ func (s *LarkService) Name() string {
 	return "Lark-WS-Service"
 }
 func (s *LarkService) Start(ctx context.Context) error {
+	// 连接数据库
+	dbClient, err := utils.OpenSQLite("/data/ai_brain.db", "")
+	if err != nil {
+		return fmt.Errorf("failed to connect to SQLite: %v", err)
+	}
+	s.dbClient = dbClient
+
+	// 创建所需的所有表
+	model.CreateShotMemoryTable(dbClient)
+	model.CreateCoreMemoryTable(dbClient)
+	model.CreateTaskMemoryTable(dbClient)
+	model.CreateAgentsTable(dbClient)
+	model.CreateSkillsTable(dbClient)
+	model.CreateBootstrapTable(dbClient)
+	model.CreateHeadbeatTable(dbClient)
+	model.CreateIdentityTable(dbClient)
+	model.CreateSoulTable(dbClient)
+	model.CreateToolsTable(dbClient)
+	model.CreateUserTable(dbClient)
+
 	fmt.Println("[Lark-WS] 正在建立长连接...")
 	// Start 会阻塞，直到连接断开，所以我们要放在协程里或处理好阻塞
 	// 这里直接调用 Start，由 Manager 在协程中启动它

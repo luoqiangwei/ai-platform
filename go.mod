@@ -10,6 +10,6 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.34
 )
 
-require github.com/gorilla/websocket v1.5.3
+require github.com/gorilla/websocket v1.5.3 // indirect
 
 require github.com/gogo/protobuf v1.3.2 // indirect
