@@ -15,7 +15,6 @@ import (
 type MessageContent struct {
 	Text string `json:"text"`
 }
-
 type LarkService struct {
 	appID       string
 	appSecret   string
@@ -32,51 +31,34 @@ func NewLarkService(appID, appSecret string, ai *AIService) *LarkService {
 		appSecret:  appSecret,
 		larkClient: lark.NewClient(appID, appSecret), // 初始化 API Client
 	}
-
-	fmt.Printf("[Lark-WS] 启动服务\n")
-
 	eventHandler := dispatcher.NewEventDispatcher("", "").
 		OnP2MessageReceiveV1(func(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
 			// 1. Parse message immediately
 			msgID := *event.Event.Message.MessageId
 			userID := *event.Event.Sender.SenderId.OpenId
-			chatType := *event.Event.Message.ChatType // "p2p" or "group"
-
 			var content struct {
 				Text string `json:"text"`
 			}
 			json.Unmarshal([]byte(*event.Event.Message.Content), &content)
-
-			// Handle local commands before hitting the AI
 			if content.Text == "/reset" {
-				ai.ResetUserSession(userID)
-				s.reply(context.Background(), msgID, "🧠 Memory wiped! Starting a fresh context with OpenClaw.")
+				ai.ClearHistory(userID)
+				s.reply(context.Background(), msgID, "已清除对话记忆，开启新聊天！")
 				return nil
 			}
-
-			// ASYNC execution to prevent Lark's 3-second timeout
+			// 2. ASYNC: Handle AI logic in a separate goroutine to avoid Lark timeout (3s)
 			go func() {
-				fmt.Printf("[Lark -> OpenClaw] Dispatching task from %s: %s\n", userID, content.Text)
-
-				// Ask OpenClaw, passing the chat environment so it can decide how to answer
-				answer, err := ai.AskOpenClaw(userID, content.Text, chatType)
+				// Use background context for async task
+				fmt.Printf("[Lark] User asked: %s\n", content.Text)
+				answer, err := ai.ChatWithMemory(userID, content.Text)
 				if err != nil {
-					fmt.Printf("[Lark -> OpenClaw] Error getting response: %v\n", err)
-					s.reply(context.Background(), msgID, "❌ OpenClaw Gateway Error: "+err.Error())
+					s.reply(context.Background(), msgID, "❌ AI Service Error: "+err.Error())
 					return
 				}
-
 				s.reply(context.Background(), msgID, answer)
-
-				s.mu.Lock()
-				s.msgCount++
-				s.lastMessage = content.Text
-				s.mu.Unlock()
 			}()
-
+			// 3. RETURN IMMEDIATELY: Tell Lark we received the event
 			return nil
 		})
-
 	s.wsClient = larkws.NewClient(appID, appSecret, larkws.WithEventHandler(eventHandler))
 	return s
 }
@@ -88,7 +70,6 @@ func (s *LarkService) reply(ctx context.Context, messageID string, text string) 
 	replyContent, _ := json.Marshal(map[string]string{
 		"text": text,
 	})
-
 	// 2. 构建请求对象
 	req := larkim.NewReplyMessageReqBuilder().
 		MessageId(messageID).
@@ -97,43 +78,35 @@ func (s *LarkService) reply(ctx context.Context, messageID string, text string) 
 			Content(string(replyContent)).
 			Build()).
 		Build()
-
 	// 3. 发起调用
 	// 注意：在 Go SDK 中，Reply 挂在 Im.Message 下
 	resp, err := s.larkClient.Im.Message.Reply(ctx, req)
-
 	if err != nil {
 		fmt.Printf("[Lark-WS] API 调用系统错误: %v\n", err)
 		return err
 	}
-
 	if !resp.Success() {
 		fmt.Printf("[Lark-WS] 回复失败，错误码: %d, 错误信息: %s, RequestID: %s\n",
 			resp.Code, resp.Msg, resp.RequestId())
 		return fmt.Errorf("lark reply failed: %s", resp.Msg)
 	}
-
 	fmt.Println("[Lark-WS] 回复发送成功！")
 	return nil
 }
-
 func (s *LarkService) Name() string {
 	return "Lark-WS-Service"
 }
-
 func (s *LarkService) Start(ctx context.Context) error {
 	fmt.Println("[Lark-WS] 正在建立长连接...")
 	// Start 会阻塞，直到连接断开，所以我们要放在协程里或处理好阻塞
 	// 这里直接调用 Start，由 Manager 在协程中启动它
 	return s.wsClient.Start(ctx)
 }
-
 func (s *LarkService) Stop() error {
 	// 长连接会随着 context 取消自动关闭
 	fmt.Println("Stop LarkService...")
 	return nil
 }
-
 func (s *LarkService) Status() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

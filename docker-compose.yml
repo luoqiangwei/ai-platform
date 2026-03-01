@@ -16,72 +16,16 @@ services:
     networks:
       - ai-network
 
-  # 2. OpenClaw Gateway (The Brain)
-  openclaw-gateway:
-    image: openclaw-cn-im:latest  # Use the latest stable version
-    container_name: openclaw-brain
-    restart: always
-    depends_on:
-      - db
-    cap_add:
-      - CHOWN
-      - SETUID
-      - SETGID
-      - DAC_OVERRIDE
-    user: ${OPENCLAW_RUN_USER:-0:0} # Starts as root to fix permissions, then drops to node
-    environment:
-      TZ: Asia/Shanghai
-      HOME: /home/node
-      TERM: xterm-256color
-
-      # Model Configuration
-      SYNC_MODEL_CONFIG: "true"
-      MODEL_ID: ${MODEL_ID}
-      BASE_URL: ${BASE_URL}
-      API_KEY: ${API_KEY}
-      API_PROTOCOL: ${API_PROTOCOL}
-      CONTEXT_WINDOW: ${CONTEXT_WINDOW}
-      MAX_TOKENS: ${MAX_TOKENS}
-
-      # Feishu Integration
-      FEISHU_APP_ID: ${FEISHU_APP_ID}
-      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET}
-
-      # Workspace & Gateway Config
-      WORKSPACE: ${WORKSPACE}
-      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}
-      OPENCLAW_GATEWAY_BIND: ${OPENCLAW_GATEWAY_BIND}
-      OPENCLAW_GATEWAY_PORT: ${OPENCLAW_GATEWAY_PORT}
-      OPENCLAW_BRIDGE_PORT: ${OPENCLAW_BRIDGE_PORT}
-      OPENCLAW_GATEWAY_MODE: ${OPENCLAW_GATEWAY_MODE}
-      OPENCLAW_GATEWAY_ALLOWED_ORIGINS: "*"
-      OPENCLAW_GATEWAY_ALLOW_INSECURE_AUTH: "true"
-      OPENCLAW_GATEWAY_DANGEROUSLY_DISABLE_DEVICE_AUTH: "true"
-      OPENCLAW_PLUGINS_ENABLED: "true"
-    volumes:
-      # Use a fresh directory to avoid old config conflicts
-      - ./openclaw_data:/home/node/.openclaw
-      # Anonymous volume to use the plugins pre-installed in the image
-      - /home/node/.openclaw/extensions
-    ports:
-      - "${OPENCLAW_GATEWAY_PORT}:18789"
-      - "${OPENCLAW_BRIDGE_PORT}:18790"
-    init: true
-    networks:
-      - ai-network
-
-  # 3. Your Go Platform (The Nervous System)
+  # 2. Your Go Platform (The Nervous System)
   app:
     image: ai-platform:latest
     container_name: ai-platform-app
     restart: always
     depends_on:
-      - openclaw-gateway
       - db
     env_file: .env
     environment:
       - DB_HOST=db
-      - OPENCLAW_URL=http://openclaw-gateway:${OPENCLAW_GATEWAY_PORT}
     ports:
       - "8080:8080"
     networks:
