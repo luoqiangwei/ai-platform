@@ -33,6 +33,8 @@ func NewLarkService(appID, appSecret string, ai *AIService) *LarkService {
 		larkClient: lark.NewClient(appID, appSecret), // 初始化 API Client
 	}
 
+	fmt.Printf("[Lark-WS] 启动服务\n")
+
 	eventHandler := dispatcher.NewEventDispatcher("", "").
 		OnP2MessageReceiveV1(func(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
 			// 1. Parse message immediately
@@ -59,6 +61,7 @@ func NewLarkService(appID, appSecret string, ai *AIService) *LarkService {
 				// Ask OpenClaw, passing the chat environment so it can decide how to answer
 				answer, err := ai.AskOpenClaw(userID, content.Text, chatType)
 				if err != nil {
+					fmt.Printf("[Lark -> OpenClaw] Error getting response: %v\n", err)
 					s.reply(context.Background(), msgID, "❌ OpenClaw Gateway Error: "+err.Error())
 					return
 				}

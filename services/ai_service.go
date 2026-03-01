@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"sync"
@@ -12,8 +13,9 @@ import (
 )
 
 type AIService struct {
-	apiURL string
-	client *http.Client
+	apiURL  string
+	modelID string
+	client  *http.Client
 
 	// We don't store message history anymore. OpenClaw handles that!
 	// We only store a session version for each user to implement the "/reset" feature.
@@ -33,6 +35,13 @@ func NewAIService() *AIService {
 	if openclawURL == "" {
 		openclawURL = "http://localhost:9090"
 	}
+
+	modelID := os.Getenv("OPENCLAW_MODEL_ID")
+	if modelID == "" {
+		modelID = "default/qwen-flash"
+	}
+
+	fmt.Printf("[AIService] Initializing with OpenClaw Gateway at %s, model: %s\n", openclawURL, modelID)
 
 	return &AIService{
 		apiURL:          openclawURL + "/v1/chat/completions",
@@ -56,7 +65,7 @@ func (s *AIService) AskOpenClaw(userID string, userInput string, chatType string
 
 	// 3. Build the payload. OpenClaw uses the "user" field for memory isolation.
 	requestBody := map[string]interface{}{
-		"model": "default", // OpenClaw routes this to whatever model is configured in its config.yaml
+		"model": s.modelID, // OpenClaw routes this to whatever model is configured in its config.yaml
 		"messages": []Message{
 			{Role: "user", Content: enrichedInput},
 		},
@@ -66,6 +75,7 @@ func (s *AIService) AskOpenClaw(userID string, userInput string, chatType string
 	jsonData, _ := json.Marshal(requestBody)
 	req, err := http.NewRequest("POST", s.apiURL, bytes.NewBuffer(jsonData))
 	if err != nil {
+		fmt.Printf("[AIService] Failed to create request: %v\n", err)
 		return "", err
 	}
 
@@ -75,6 +85,7 @@ func (s *AIService) AskOpenClaw(userID string, userInput string, chatType string
 
 	resp, err := s.client.Do(req)
 	if err != nil {
+		fmt.Printf("[AIService] Request to OpenClaw failed: %v\n", err)
 		return "", fmt.Errorf("failed to reach OpenClaw: %w", err)
 	}
 	defer resp.Body.Close()
@@ -88,7 +99,10 @@ func (s *AIService) AskOpenClaw(userID string, userInput string, chatType string
 		Error map[string]interface{} `json:"error"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	fmt.Printf("OpenClaw Raw Response: %s\n", string(bodyBytes))
+	if err := json.Unmarshal(bodyBytes, &result); err != nil {
+		fmt.Printf("[AIService] Failed to decode OpenClaw response: %v\n", err)
 		return "", err
 	}
 

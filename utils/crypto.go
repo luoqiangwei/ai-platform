@@ -3,6 +3,8 @@ package utils
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/rsa"
@@ -13,7 +15,9 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
+	"time"
 )
 
 // HashMD5 returns the MD5 checksum of the data.
@@ -152,4 +156,31 @@ func DecryptRSA(privKeyPEM []byte, ciphertextBase64 string) (string, error) {
 		return "", err
 	}
 	return string(plaintext), nil
+}
+
+func GenerateDeviceAuthFields() (string, string, int64, string, error) {
+	// 生成公私钥对（示例为 ECDSA）
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return "", "", 0, "", err
+	}
+
+	publicKey := privateKey.PublicKey
+	// 生成签名数据
+	nonce := fmt.Sprintf("%d", time.Now().UnixNano())
+	signedAt := time.Now().Unix()
+
+	dataToSign := fmt.Sprintf("%s%d", nonce, signedAt)
+	hash := sha256.Sum256([]byte(dataToSign))
+
+	// 使用私钥对数据进行签名
+	signature, err := ecdsa.SignASN1(rand.Reader, privateKey, hash[:])
+	if err != nil {
+		return "", "", 0, "", err
+	}
+
+	// 返回生成的设备字段
+	publicKeyStr := fmt.Sprintf("%x", publicKey.X) // 公钥（示例为 X 坐标）
+	signatureStr := fmt.Sprintf("%x", signature)   // 签名（十六进制字符串）
+	return publicKeyStr, signatureStr, signedAt, nonce, nil
 }
