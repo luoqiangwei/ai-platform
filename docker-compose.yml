@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  # 1. PostgreSQL Database
+  db:
+    image: postgres:16-alpine
+    container_name: ai-platform-db
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER:-admin}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-password123}
+      POSTGRES_DB: ai_platform
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro # 自动初始化脚本
+    networks:
+      - ai-network
+
+  # 2. OpenClaw Gateway (The Brain)
+  openclaw:
+    image: ghcr.io/openclaw/openclaw:latest  # Use the latest stable version
+    container_name: openclaw-brain
+    restart: always
+    depends_on:
+      - db
+    environment:
+      # Map DashScope Key to OPENAI_API_KEY so the compatible client works
+      - OPENAI_API_KEY=${DASHSCOPE_API_KEY}
+    volumes:
+      # Restrict its control scope by mounting only specific skill directories
+      - ./openclaw:/home/node/.openclaw
+      - ./openclaw/skills:/opt/openclaw/skills
+    networks:
+      - ai-network
+    ports:
+      - "9090:18789"
+
+  # 3. Your Go Platform (The Nervous System)
+  app:
+    build: .
+    container_name: ai-platform-app
+    restart: always
+    depends_on:
+      - openclaw
+      - db
+    env_file: .env
+    environment:
+      - DB_HOST=db
+      - OPENCLAW_URL=http://openclaw:9090
+    ports:
+      - "8080:8080"
+    networks:
+      - ai-network
+
+networks:
+  ai-network:
+    driver: bridge

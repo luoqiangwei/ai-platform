@@ -38,32 +38,39 @@ func NewLarkService(appID, appSecret string, ai *AIService) *LarkService {
 			// 1. Parse message immediately
 			msgID := *event.Event.Message.MessageId
 			userID := *event.Event.Sender.SenderId.OpenId
+			chatType := *event.Event.Message.ChatType // "p2p" or "group"
+
 			var content struct {
 				Text string `json:"text"`
 			}
 			json.Unmarshal([]byte(*event.Event.Message.Content), &content)
 
+			// Handle local commands before hitting the AI
 			if content.Text == "/reset" {
-				ai.ClearHistory(userID)
-				s.reply(context.Background(), msgID, "已清除对话记忆，开启新聊天！")
+				ai.ResetUserSession(userID)
+				s.reply(context.Background(), msgID, "🧠 Memory wiped! Starting a fresh context with OpenClaw.")
 				return nil
 			}
 
-			// 2. ASYNC: Handle AI logic in a separate goroutine to avoid Lark timeout (3s)
+			// ASYNC execution to prevent Lark's 3-second timeout
 			go func() {
-				// Use background context for async task
-				fmt.Printf("[Lark] User asked: %s\n", content.Text)
+				fmt.Printf("[Lark -> OpenClaw] Dispatching task from %s: %s\n", userID, content.Text)
 
-				answer, err := ai.ChatWithMemory(userID, content.Text)
+				// Ask OpenClaw, passing the chat environment so it can decide how to answer
+				answer, err := ai.AskOpenClaw(userID, content.Text, chatType)
 				if err != nil {
-					s.reply(context.Background(), msgID, "❌ AI Service Error: "+err.Error())
+					s.reply(context.Background(), msgID, "❌ OpenClaw Gateway Error: "+err.Error())
 					return
 				}
 
 				s.reply(context.Background(), msgID, answer)
+
+				s.mu.Lock()
+				s.msgCount++
+				s.lastMessage = content.Text
+				s.mu.Unlock()
 			}()
 
-			// 3. RETURN IMMEDIATELY: Tell Lark we received the event
 			return nil
 		})
 

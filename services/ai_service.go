@@ -12,14 +12,13 @@ import (
 )
 
 type AIService struct {
-	apiKey string
 	apiURL string
-	model  string
 	client *http.Client
-	// Memory: Key is UserID (OpenID), Value is the conversation history
-	history    map[string][]Message
-	historyMu  sync.RWMutex
-	maxHistory int // Limit the number of messages to save tokens
+
+	// We don't store message history anymore. OpenClaw handles that!
+	// We only store a session version for each user to implement the "/reset" feature.
+	sessionVersions map[string]int64
+	mu              sync.RWMutex
 }
 
 type Message struct {
@@ -28,25 +27,40 @@ type Message struct {
 }
 
 func NewAIService() *AIService {
+	// Use the OpenClaw Gateway URL from the environment (e.g., http://openclaw:9090)
+	// Fallback to localhost if running outside Docker
+	openclawURL := os.Getenv("OPENCLAW_URL")
+	if openclawURL == "" {
+		openclawURL = "http://localhost:9090"
+	}
+
 	return &AIService{
-		// Fetch API Key from environment variables
-		apiKey:     os.Getenv("DASHSCOPE_API_KEY"),
-		apiURL:     "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-		model:      "qwen-plus",
-		client:     &http.Client{Timeout: 60 * time.Second},
-		history:    make(map[string][]Message),
-		maxHistory: 10, // Keep last 10 messages
+		apiURL:          openclawURL + "/v1/chat/completions",
+		client:          &http.Client{Timeout: 120 * time.Second}, // Agent execution takes time
+		sessionVersions: make(map[string]int64),
 	}
 }
 
-// Chat sends user input to the LLM and returns the generated response
-func (s *AIService) Chat(userInput string) (string, error) {
+// AskOpenClaw sends the task to the OpenClaw gateway
+func (s *AIService) AskOpenClaw(userID string, userInput string, chatType string) (string, error) {
+	// 1. Generate a unique session ID for the user based on their reset version
+	s.mu.RLock()
+	version := s.sessionVersions[userID]
+	s.mu.RUnlock()
+
+	// Example: "ou_12345_1700000000"
+	sessionID := fmt.Sprintf("%s_%d", userID, version)
+
+	// 2. Add context to the user input so OpenClaw knows the environment
+	enrichedInput := fmt.Sprintf("[Source: %s]\n%s", chatType, userInput)
+
+	// 3. Build the payload. OpenClaw uses the "user" field for memory isolation.
 	requestBody := map[string]interface{}{
-		"model": s.model,
-		"messages": []map[string]string{
-			{"role": "system", "content": "You are a professional assistant."},
-			{"role": "user", "content": userInput},
+		"model": "default", // OpenClaw routes this to whatever model is configured in its config.yaml
+		"messages": []Message{
+			{Role: "user", Content: enrichedInput},
 		},
+		"user": sessionID, // Critical: Tells OpenClaw which memory vault to use
 	}
 
 	jsonData, _ := json.Marshal(requestBody)
@@ -55,12 +69,13 @@ func (s *AIService) Chat(userInput string) (string, error) {
 		return "", err
 	}
 
-	req.Header.Set("Authorization", "Bearer "+s.apiKey)
 	req.Header.Set("Content-Type", "application/json")
+	// OpenClaw might require a local auth token if configured, otherwise it ignores this
+	req.Header.Set("Authorization", "Bearer openclaw-local-token")
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to reach OpenClaw: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -81,72 +96,19 @@ func (s *AIService) Chat(userInput string) (string, error) {
 		return result.Choices[0].Message.Content, nil
 	}
 
-	return "", fmt.Errorf("AI response empty or error: %v", result.Error)
+	return "", fmt.Errorf("OpenClaw error: %v", result.Error)
 }
 
-func (s *AIService) ChatWithMemory(userID string, userInput string) (string, error) {
-	s.historyMu.Lock()
-	defer s.historyMu.Unlock()
-
-	// 1. Get or initialize history
-	msgs := s.history[userID]
-	if len(msgs) == 0 {
-		msgs = append(msgs, Message{Role: "system", Content: "You are a helpful assistant."})
-	}
-
-	// 2. Append new user message
-	msgs = append(msgs, Message{Role: "user", Content: userInput})
-
-	// 3. Prepare request body
-	requestBody := map[string]interface{}{
-		"model":    s.model,
-		"messages": msgs,
-	}
-
-	jsonData, _ := json.Marshal(requestBody)
-	req, _ := http.NewRequest("POST", s.apiURL, bytes.NewBuffer(jsonData))
-	req.Header.Set("Authorization", "Bearer "+s.apiKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := s.client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		Choices []struct {
-			Message Message `json:"message"`
-		} `json:"choices"`
-	}
-	json.NewDecoder(resp.Body).Decode(&result)
-
-	if len(result.Choices) > 0 {
-		aiMsg := result.Choices[0].Message
-		// 4. Save AI's response to history
-		msgs = append(msgs, aiMsg)
-
-		// 5. Sliding window: trim history if it's too long
-		if len(msgs) > s.maxHistory {
-			// Keep system prompt + the latest N messages
-			msgs = append([]Message{msgs[0]}, msgs[len(msgs)-s.maxHistory:]...)
-		}
-		s.history[userID] = msgs
-
-		return aiMsg.Content, nil
-	}
-
-	return "", fmt.Errorf("AI empty response")
+// ResetUserSession forces OpenClaw to start a new memory session for the user
+func (s *AIService) ResetUserSession(userID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Update the version to current Unix time, effectively starting a new session ID
+	s.sessionVersions[userID] = time.Now().Unix()
 }
 
-func (s *AIService) ClearHistory(userID string) {
-	s.historyMu.Lock()
-	defer s.historyMu.Unlock()
-	delete(s.history, userID)
-}
-
-// These satisfy the core.Service interface if you want to register it as a service
-func (s *AIService) Name() string                    { return "AI-Core-Service" }
+// Interface compliance
+func (s *AIService) Name() string                    { return "OpenClaw-Gateway-Service" }
 func (s *AIService) Start(ctx context.Context) error { return nil }
 func (s *AIService) Stop() error                     { return nil }
-func (s *AIService) Status() string                  { return "Ready" }
+func (s *AIService) Status() string                  { return "Delegating AI to OpenClaw" }
