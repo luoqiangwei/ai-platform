@@ -119,6 +119,56 @@ func (c *SQLiteClient) UpdateTable(tableName string, removeFields []string, upda
 	return nil
 }
 
+func (c *SQLiteClient) GetTableColumns(tableName string) (map[string]bool, error) {
+	rows, err := c.db.Query(fmt.Sprintf("PRAGMA table_info(%s)", tableName))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	cols := make(map[string]bool)
+	for rows.Next() {
+		var (
+			cid       int
+			name      string
+			dataType  string
+			notnull   int
+			dfltValue interface{}
+			pk        int
+		)
+		if err := rows.Scan(&cid, &name, &dataType, &notnull, &dfltValue, &pk); err != nil {
+			return nil, err
+		}
+		cols[name] = true
+	}
+	return cols, nil
+}
+
+func (c *SQLiteClient) EnsureColumns(tableName string, fields []FieldDescription) error {
+	existing, err := c.GetTableColumns(tableName)
+	if err != nil {
+		return err
+	}
+
+	for _, nf := range fields {
+		if existing[nf.Name] {
+			continue
+		}
+		if nf.IsPrimaryKey {
+			return errors.New("adding a primary key to an existing table is not supported in SQLite")
+		}
+		def := fmt.Sprintf("%s %s", nf.Name, nf.DataType)
+		if nf.HasDefault {
+			def += " DEFAULT " + nf.DefaultValue
+		}
+		query := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s", tableName, def)
+		if _, err := c.db.Exec(query); err != nil {
+			return fmt.Errorf("failed to add column %s to %s: %w", nf.Name, tableName, err)
+		}
+	}
+	return nil
+}
+
 // InsertData inserts a new record.
 func (c *SQLiteClient) InsertData(tableName string, data []FieldData) error {
 	if len(data) == 0 {

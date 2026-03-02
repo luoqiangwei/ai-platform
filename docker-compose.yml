@@ -30,6 +30,8 @@ services:
       - "8080:8080"
     volumes:
       - ./sqlite_data:/data
+      - ./aistore:/aistore
+      - ./aiworkspace:/aiworkspace
     networks:
       - ai-network
 

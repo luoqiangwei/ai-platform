@@ -20,11 +20,14 @@ RUN go build -ldflags "-X main.Version=${APP_VERSION}" -o ai-platform .
 FROM debian:bookworm-slim
 
 # 安装必要的依赖
-RUN apt-get update && apt-get install -y ca-certificates && apt-get clean
+RUN apt-get update && apt-get install -y ca-certificates curl wget bash coreutils && apt-get clean
 RUN mkdir /data
+RUN mkdir /aiworkspace
+RUN mkdir /aistore
 
 # 将编译好的可执行文件复制到最终镜像中
 COPY --from=builder /app/ai-platform /usr/local/bin/ai-platform
+COPY --from=builder /app/aistore /aistore
 
 # 设置容器启动时执行的命令
 ENTRYPOINT ["/usr/local/bin/ai-platform"]

@@ -58,7 +58,7 @@ func main() {
 
 	// 4. Register a timer service (runs a task every 5 seconds)
 	timerTask := func() {
-		fmt.Printf("[%s] Timer ticked. Doing some background work...\n", time.Now().Format(time.RFC3339))
+		// fmt.Printf("[%s] Timer ticked. Doing some background work...\n", time.Now().Format(time.RFC3339))
 		// You can use utils.HashMD5("data") or DB connections here
 	}
 	timerSrv := utils.NewTimerService("Log-Cleanup-Timer", 5*time.Second, timerTask)

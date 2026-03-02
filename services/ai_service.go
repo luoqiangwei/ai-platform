@@ -5,10 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
+	"regexp"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -26,6 +31,41 @@ type AIService struct {
 type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+}
+
+type IntentResult struct {
+	Intent   string   `json:"intent"`
+	MCP      []string `json:"mcp"`
+	Tools    []string `json:"tools"`
+	Skills   []string `json:"skills"`
+	DocTypes []string `json:"doc_types"`
+}
+
+type WebSearchResult struct {
+	Title   string `json:"title"`
+	URL     string `json:"url"`
+	Snippet string `json:"snippet"`
+}
+
+func aiDebugEnabled() bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv("AI_DEBUG")))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
+}
+
+func aiDebugMaxChars() int {
+	if v := strings.TrimSpace(os.Getenv("AI_DEBUG_MAX_CHARS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 12000
+}
+
+func truncateForDebug(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	return s[:max] + "...(truncated)"
 }
 
 func NewAIService() *AIService {
@@ -83,6 +123,9 @@ func (s *AIService) Chat(userInput string) (string, error) {
 		},
 	}
 	jsonData, _ := json.Marshal(requestBody)
+	if aiDebugEnabled() {
+		log.Printf("[AI-Debug] Chat request body: %s", truncateForDebug(string(jsonData), aiDebugMaxChars()))
+	}
 	req, err := http.NewRequest("POST", s.apiURL, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return "", err
@@ -94,6 +137,10 @@ func (s *AIService) Chat(userInput string) (string, error) {
 		return "", err
 	}
 	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if aiDebugEnabled() {
+		log.Printf("[AI-Debug] Chat response status=%d body=%s", resp.StatusCode, truncateForDebug(string(raw), aiDebugMaxChars()))
+	}
 	var result struct {
 		Choices []struct {
 			Message struct {
@@ -102,13 +149,242 @@ func (s *AIService) Chat(userInput string) (string, error) {
 		} `json:"choices"`
 		Error map[string]interface{} `json:"error"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(raw, &result); err != nil {
 		return "", err
 	}
 	if len(result.Choices) > 0 {
 		return result.Choices[0].Message.Content, nil
 	}
 	return "", fmt.Errorf("AI response empty or error: %v", result.Error)
+}
+
+func (s *AIService) WebSearch(query string, limit int) ([]WebSearchResult, error) {
+	endpoint := os.Getenv("WEB_SEARCH_ENDPOINT")
+	if endpoint == "" {
+		return s.duckDuckGoSearch(query, limit)
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	q := u.Query()
+	q.Set("q", query)
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	u.RawQuery = q.Encode()
+
+	if aiDebugEnabled() {
+		log.Printf("[AI-Debug] web_search GET %s", u.String())
+	}
+
+	req, err := http.NewRequest("GET", u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey := os.Getenv("WEB_SEARCH_API_KEY"); apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if aiDebugEnabled() {
+		log.Printf("[AI-Debug] web_search response status=%d body=%s", resp.StatusCode, truncateForDebug(string(body), aiDebugMaxChars()))
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("web_search status=%d body=%s", resp.StatusCode, string(body))
+	}
+
+	var asObj struct {
+		Results []WebSearchResult `json:"results"`
+	}
+	if err := json.Unmarshal(body, &asObj); err == nil && len(asObj.Results) > 0 {
+		return asObj.Results, nil
+	}
+
+	var asArr []WebSearchResult
+	if err := json.Unmarshal(body, &asArr); err == nil && len(asArr) > 0 {
+		return asArr, nil
+	}
+
+	return []WebSearchResult{}, nil
+}
+
+func (s *AIService) duckDuckGoSearch(query string, limit int) ([]WebSearchResult, error) {
+	if strings.TrimSpace(query) == "" {
+		return []WebSearchResult{}, nil
+	}
+	if limit <= 0 {
+		limit = 5
+	}
+	if limit > 10 {
+		limit = 10
+	}
+	u := "https://html.duckduckgo.com/html/?q=" + url.QueryEscape(query)
+	if aiDebugEnabled() {
+		log.Printf("[AI-Debug] web_search fallback GET %s", u)
+	}
+	req, err := http.NewRequest("GET", u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "text/html")
+	req.Header.Set("User-Agent", "ai-platform/1.0")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 800*1024))
+	if err != nil {
+		return nil, err
+	}
+	body := string(bodyBytes)
+	if aiDebugEnabled() {
+		log.Printf("[AI-Debug] web_search fallback response status=%d body=%s", resp.StatusCode, truncateForDebug(body, aiDebugMaxChars()))
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("web_search fallback status=%d", resp.StatusCode)
+	}
+	return parseDuckDuckGoHTML(body, limit), nil
+}
+
+func parseDuckDuckGoHTML(body string, limit int) []WebSearchResult {
+	if limit <= 0 {
+		limit = 5
+	}
+	if limit > 10 {
+		limit = 10
+	}
+	reLinkA := regexp.MustCompile(`(?is)<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>`)
+	reLinkB := regexp.MustCompile(`(?is)<a[^>]+class="result-link"[^>]+href="([^"]+)"[^>]*>(.*?)</a>`)
+	reTag := regexp.MustCompile(`(?is)<[^>]+>`)
+
+	var matches [][]string
+	matches = reLinkA.FindAllStringSubmatch(body, -1)
+	if len(matches) == 0 {
+		matches = reLinkB.FindAllStringSubmatch(body, -1)
+	}
+	var out []WebSearchResult
+	seen := map[string]bool{}
+	for _, m := range matches {
+		if len(m) < 3 {
+			continue
+		}
+		link := strings.TrimSpace(html.UnescapeString(m[1]))
+		title := strings.TrimSpace(html.UnescapeString(reTag.ReplaceAllString(m[2], "")))
+		if link == "" || title == "" {
+			continue
+		}
+		if resolved := resolveDuckDuckGoRedirect(link); resolved != "" {
+			link = resolved
+		}
+		key := strings.ToLower(link)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, WebSearchResult{Title: title, URL: link, Snippet: ""})
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func resolveDuckDuckGoRedirect(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	if !strings.Contains(strings.ToLower(u.Host), "duckduckgo.com") {
+		return ""
+	}
+	q := u.Query()
+	uddg := q.Get("uddg")
+	if uddg == "" {
+		return ""
+	}
+	if v, err := url.QueryUnescape(uddg); err == nil && strings.TrimSpace(v) != "" {
+		return v
+	}
+	return ""
+}
+
+func (s *AIService) AnalyzeIntent(userInput string) (*IntentResult, error) {
+	requestBody := map[string]interface{}{
+		"model": s.model,
+		"messages": []map[string]string{
+			{"role": "system", "content": "Analyze the user's message and output a compact JSON with keys: intent (string), mcp (string array), tools (string array), skills (string array), doc_types (string array). Output JSON only.\n\nConstraints:\n- tools must be chosen only from: [\"web_search\",\"weather_query\",\"sh\",\"curl\",\"wget\",\"cat\",\"browser\"].\n- If no suitable tool exists, output tools as []. Do not invent tool names."},
+			{"role": "user", "content": userInput},
+		},
+	}
+	jsonData, _ := json.Marshal(requestBody)
+	if aiDebugEnabled() {
+		log.Printf("[AI-Debug] AnalyzeIntent request body: %s", truncateForDebug(string(jsonData), aiDebugMaxChars()))
+	}
+	req, err := http.NewRequest("POST", s.apiURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+s.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if aiDebugEnabled() {
+		log.Printf("[AI-Debug] AnalyzeIntent response status=%d body=%s", resp.StatusCode, truncateForDebug(string(raw), aiDebugMaxChars()))
+	}
+	var result struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, err
+	}
+	if len(result.Choices) == 0 {
+		return &IntentResult{Intent: "", MCP: []string{}, Tools: []string{}, Skills: []string{}, DocTypes: []string{}}, nil
+	}
+	content := result.Choices[0].Message.Content
+	var ir IntentResult
+	if err := json.Unmarshal([]byte(content), &ir); err != nil {
+		start := -1
+		end := -1
+		for i := 0; i < len(content); i++ {
+			if content[i] == '{' {
+				start = i
+				break
+			}
+		}
+		for j := len(content) - 1; j >= 0; j-- {
+			if content[j] == '}' {
+				end = j
+				break
+			}
+		}
+		if start >= 0 && end >= 0 && end > start {
+			if err := json.Unmarshal([]byte(content[start:end+1]), &ir); err != nil {
+				ir = IntentResult{Intent: "", MCP: []string{}, Tools: []string{}, Skills: []string{}, DocTypes: []string{}}
+			}
+		} else {
+			ir = IntentResult{Intent: "", MCP: []string{}, Tools: []string{}, Skills: []string{}, DocTypes: []string{}}
+		}
+	}
+	return &ir, nil
 }
 
 func (s *AIService) ChatWithMemory(userID string, userInput string) (string, error) {
@@ -129,8 +405,9 @@ func (s *AIService) ChatWithMemory(userID string, userInput string) (string, err
 	}
 	jsonData, _ := json.Marshal(requestBody)
 
-	// 打印发送的信息（调试用）
-	log.Printf("[AI-Debug] Sending request for User: %s, Messages Count: %d", userID, len(msgs))
+	if aiDebugEnabled() {
+		log.Printf("[AI-Debug] ChatWithMemory user=%s messages=%d body=%s", userID, len(msgs), truncateForDebug(string(jsonData), aiDebugMaxChars()))
+	}
 
 	req, _ := http.NewRequest("POST", s.apiURL, bytes.NewBuffer(jsonData))
 	req.Header.Set("Authorization", "Bearer "+s.apiKey)
@@ -153,6 +430,9 @@ func (s *AIService) ChatWithMemory(userID string, userInput string) (string, err
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("[AI-Error] Status Code: %d, Body: %s", resp.StatusCode, string(bodyBytes))
 		return "", fmt.Errorf("API returned non-200 status: %d", resp.StatusCode)
+	}
+	if aiDebugEnabled() {
+		log.Printf("[AI-Debug] ChatWithMemory response body=%s", truncateForDebug(string(bodyBytes), aiDebugMaxChars()))
 	}
 
 	// 4. 解析结果
