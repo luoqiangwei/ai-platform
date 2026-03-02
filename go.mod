@@ -12,4 +12,6 @@ require (
 
 require github.com/gorilla/websocket v1.5.3 // indirect
 
+require golang.org/x/net v0.51.0
+
 require github.com/gogo/protobuf v1.3.2 // indirect

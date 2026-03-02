@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"html"
 	"io"
 	"log"
 	"net/http"
@@ -16,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/net/html"
 )
 
 type AIService struct {
@@ -163,6 +164,7 @@ func (s *AIService) WebSearch(query string, limit int) ([]WebSearchResult, error
 	if endpoint == "" {
 		return s.duckDuckGoSearch(query, limit)
 	}
+	// TODO: 可以增加对不同搜索引擎的适配逻辑，目前只实现了 Google 的解析，其他搜索引擎可能需要不同的解析方式
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return nil, err
@@ -186,6 +188,9 @@ func (s *AIService) WebSearch(query string, limit int) ([]WebSearchResult, error
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -203,19 +208,95 @@ func (s *AIService) WebSearch(query string, limit int) ([]WebSearchResult, error
 		return nil, fmt.Errorf("web_search status=%d body=%s", resp.StatusCode, string(body))
 	}
 
-	var asObj struct {
-		Results []WebSearchResult `json:"results"`
-	}
-	if err := json.Unmarshal(body, &asObj); err == nil && len(asObj.Results) > 0 {
-		return asObj.Results, nil
+	// var asObj struct {
+	// 	Results []WebSearchResult `json:"results"`
+	// }
+	// if err := json.Unmarshal(body, &asObj); err == nil && len(asObj.Results) > 0 {
+	// 	return asObj.Results, nil
+	// }
+
+	// var asArr []WebSearchResult
+	// if err := json.Unmarshal(body, &asArr); err == nil && len(asArr) > 0 {
+	// 	return asArr, nil
+	// }
+
+	// return []WebSearchResult{}, nil
+	return parseHTML(string(body), limit), nil
+}
+
+func extractText(n *html.Node) string {
+	if n.Type == html.TextNode {
+		return strings.TrimSpace(n.Data)
 	}
 
-	var asArr []WebSearchResult
-	if err := json.Unmarshal(body, &asArr); err == nil && len(asArr) > 0 {
-		return asArr, nil
+	var result string
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		result += extractText(c) + " "
+	}
+	return strings.TrimSpace(result)
+}
+
+func findSnippet(n *html.Node) string {
+	if n == nil {
+		return ""
 	}
 
-	return []WebSearchResult{}, nil
+	var f func(*html.Node) string
+	f = func(node *html.Node) string {
+		if node.Type == html.ElementNode && node.Data == "div" {
+			for _, attr := range node.Attr {
+				if attr.Key == "class" && strings.Contains(attr.Val, "VwiC3b") {
+					return extractText(node)
+				}
+			}
+		}
+		for c := node.FirstChild; c != nil; c = c.NextSibling {
+			if text := f(c); text != "" {
+				return text
+			}
+		}
+		return ""
+	}
+
+	return f(n)
+}
+
+func parseHTML(htmlContent string, limit int) []WebSearchResult {
+	doc, err := html.Parse(strings.NewReader(htmlContent))
+	if err != nil {
+		return nil
+	}
+
+	var results []WebSearchResult
+
+	var f func(*html.Node)
+	f = func(n *html.Node) {
+		if n.Type == html.ElementNode && n.Data == "h3" {
+			title := extractText(n)
+
+			// 找父节点里最近的 snippet
+			snippet := findSnippet(n.Parent)
+
+			if title != "" {
+				results = append(results, WebSearchResult{
+					Title:   title,
+					Snippet: snippet,
+				})
+			}
+
+			if len(results) >= limit {
+				return
+			}
+		}
+
+		for c := n.FirstChild; c != nil && len(results) < limit; c = c.NextSibling {
+			f(c)
+		}
+	}
+
+	f(doc)
+
+	return results
 }
 
 func (s *AIService) duckDuckGoSearch(query string, limit int) ([]WebSearchResult, error) {
@@ -323,7 +404,7 @@ func (s *AIService) AnalyzeIntent(userInput string) (*IntentResult, error) {
 	requestBody := map[string]interface{}{
 		"model": s.model,
 		"messages": []map[string]string{
-			{"role": "system", "content": "Analyze the user's message and output a compact JSON with keys: intent (string), mcp (string array), tools (string array), skills (string array), doc_types (string array). Output JSON only.\n\nConstraints:\n- tools must be chosen only from: [\"web_search\",\"weather_query\",\"sh\",\"curl\",\"wget\",\"cat\",\"browser\"].\n- If no suitable tool exists, output tools as []. Do not invent tool names."},
+			{"role": "system", "content": "Analyze the user's message and output a compact JSON with keys: intent (string), mcp (string array), tools (string array), skills (string array), doc_types (string array). Output JSON only.\n\nConstraints:\n- tools must be chosen only from: [\"web_search\",\"weather_query\",\"sh\",\"curl\",\"wget\",\"cat\",\"browser\"].\n- If no suitable tool exists, output tools as []. Do not invent tool names. If a tool returns irrelevant information or the same result multiple times, do not retry the same query. Instead, try a different search query or explain the difficulty to the user."},
 			{"role": "user", "content": userInput},
 		},
 	}

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -479,6 +481,21 @@ func (s *AIService) executeToolCalls(ctx context.Context, userID string, calls [
 	return results, nil
 }
 
+func sanitizeText(input string) string {
+	reScript := regexp.MustCompile(`(?is)<script.*?>.*?</script>`)
+	reStyle := regexp.MustCompile(`(?is)<style.*?>.*?</style>`)
+	reNav := regexp.MustCompile(`(?is)<nav.*?>.*?</nav>`)
+	reTag := regexp.MustCompile(`(?is)<[^>]+>`)
+
+	output := reScript.ReplaceAllString(input, "")
+	output = reStyle.ReplaceAllString(output, "")
+	output = reNav.ReplaceAllString(output, "")
+	output = reTag.ReplaceAllString(output, "")
+	output = html.UnescapeString(output)
+
+	return strings.TrimSpace(output)
+}
+
 func (s *AIService) executeOneTool(ctx context.Context, c AgentToolCall, workspace string, dbClient *utils.SQLiteClient) (AgentToolResult, error) {
 	timeout := 60 * time.Second
 	if v := strings.TrimSpace(os.Getenv("AI_TOOL_TIMEOUT_SECONDS")); v != "" {
@@ -504,6 +521,37 @@ func (s *AIService) executeOneTool(ctx context.Context, c AgentToolCall, workspa
 		if err != nil {
 			return AgentToolResult{Tool: "web_search", Command: query, ExitCode: 1, Stderr: err.Error()}, nil
 		}
+		// // 2. 提取文本信息并进行过滤 (如过滤掉 script, style, nav 等)
+		// // 这里的 results 已经是经过 parseHTML 初步清洗的结构化数据
+		// var cleanOutput []string
+		// for i, res := range results {
+		// 	// 进一步确保没有残留的 HTML 标签或干扰词
+		// 	title := strings.TrimSpace(res.Title)
+		// 	snippet := strings.TrimSpace(res.Snippet)
+
+		// 	if title != "" {
+		// 		cleanOutput = append(cleanOutput, fmt.Sprintf("[%d] 标题: %s\n摘要: %s", i+1, title, snippet))
+		// 	}
+		// }
+
+		// // 3. 如果结果为空，明确告知 LLM，防止其反复重试同一查询
+		// if len(cleanOutput) == 0 {
+		// 	return AgentToolResult{
+		// 		Tool:     "web_search",
+		// 		Command:  query,
+		// 		ExitCode: 0,
+		// 		Stdout:   "未找到相关搜索结果。请尝试更改关键词或使用其他工具（如 browser 直接访问特定 URL）。",
+		// 	}, nil
+		// }
+
+		// // 返回格式化后的纯文本结果，LLM 更容易理解
+		// finalStdout := strings.Join(cleanOutput, "\n\n")
+		// return AgentToolResult{
+		// 	Tool:     "web_search",
+		// 	Command:  query,
+		// 	ExitCode: 0,
+		// 	Stdout:   finalStdout,
+		// }, nil
 		b, _ := json.Marshal(results)
 		return AgentToolResult{Tool: "web_search", Command: query, ExitCode: 0, Stdout: string(b)}, nil
 	case "weather_query", "weather":
